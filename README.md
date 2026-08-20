@@ -13,21 +13,11 @@
   * Отрисовка без мерцания через двойную буферизацию и in-place позиционирование курсора (`\033[H`).
   * Изолированный экранный буфер (Alternate Screen Buffer) — не засоряет историю терминала и scrollback.
   * Навигация стрелками `↑` / `↓`, `j` / `k`, `w` / `s`, выбор `Enter` / `Space`, цифры `1`–`8` для быстрого перехода.
-* 📦 **Многомодельные профили:** Каждый профиль настраивает полную связку моделей: **Opus**, **Sonnet**, **Haiku**, а также эндпоинт и параметры контекстного окна.
-* ⚡ **Прямой CLI-режим:** Возможность переключения профилей одной строкой (`cl-sw zai-1m`) без захода в интерактивное меню.
-* 💾 **Управление профилями:** Создание, редактирование, удаление пользовательских профилей прямо из меню.
+* 📦 **Многомодельные профили:** Каждый профиль настраивает полную связку моделей: **Opus**, **Sonnet**, **Haiku**, а также эндпоинт, ключ и параметры контекстного окна.
+* ⚡ **Прямой CLI-режим:** Возможность переключения профилей одной строкой (`cl-sw <profile_name>`) без захода в интерактивное меню.
+* 💾 **Управление профилями:** Создание, редактирование, сохранение и удаление пользовательских профилей прямо из меню.
 * 🛡️ **Безопасность и бэкапы:** Автоматическое резервное копирование `settings.json` перед каждым изменением в `~/.claude/backups/`.
 * 🧪 **Встроенная диагностика:** Быстрый тест соединения с текущим провайдером (`cl-sw test`).
-
----
-
-## 📋 Предустановленные профили
-
-| Профиль (`ID`) | Название | Endpoint / Окно | Модель Opus | Модель Sonnet | Модель Haiku |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **`zai-1m`** | **Z.AI GLM-5.3 [1M Window]** | `https://api.z.ai/api/anthropic`<br>*(1M Auto Compact Window)* | `glm-5.3[1m]` | `glm-5.3[1m]` | `glm-4.7` |
-| **`zai-standard`** | **Z.AI GLM-5.3 [Standard 128k]** | `https://api.z.ai/api/anthropic`<br>*(Стандартное окно)* | `glm-5.3` | `glm-4.7` | `glm-4.5-air` |
-| **`vv-router`** | **VkusVill Router** | `https://vvchat.vkusvill.ru/red-mad-router` | `claude-opus-4-6` | `gpt-5.5-pro` | `gpt-5.5` |
 
 ---
 
@@ -79,13 +69,13 @@ cl-sw
 ║  🤖                 Claude Code Profile Manager                            ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 
- Active Profile: Z.AI GLM-5.3 [1M Window]
- Endpoint:       https://api.z.ai/api/anthropic
- Opus Model:     glm-5.3[1m]
- Sonnet Model:   glm-5.3[1m]
- Haiku Model:    glm-4.7
- Context Window: 1000000  |  Effort: medium  |  Default Target: opus
- API Key:        96be...9Of
+ Active Profile: Profile Name
+ Endpoint:       https://api.example.com/v1
+ Opus Model:     custom-opus-model
+ Sonnet Model:   custom-sonnet-model
+ Haiku Model:    custom-haiku-model
+ Context Window: default  |  Effort: medium  |  Default Target: opus
+ API Key:        sk-a...9f
 ────────────────────────────────────────────────────────────────────────────
 
  Use ↑/↓ (Up/Down) or j/k to navigate, Enter to select, q/Esc to exit:
@@ -105,10 +95,10 @@ cl-sw
 # Список всех доступных профилей
 cl-sw list
 
-# Переключение на конкретный профиль
-cl-sw zai-1m
-cl-sw zai-standard
-cl-sw vv-router
+# Переключение на конкретный профиль по его ID/имени
+cl-sw <profile_name>
+# или
+cl-sw switch <profile_name>
 
 # Просмотр текущей активной конфигурации
 cl-sw current
