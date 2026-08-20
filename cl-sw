@@ -236,19 +236,41 @@ def apply_profile(profile_id: str, profiles: Dict[str, Any]) -> bool:
         print(f"{RED}Profile '{profile_id}' not found.{RESET}")
         return False
 
-    target_profile = profiles[profile_id]
-    target_config = target_profile["config"]
-
+    # 1. Save current profile's API key back to profiles.json if it was edited
     current = get_current_settings()
     cur_env = current.get("env", {})
-    cur_key = cur_env.get("ANTHROPIC_API_KEY", "")
+    cur_key = cur_env.get("ANTHROPIC_API_KEY", "") or cur_env.get("ANTHROPIC_AUTH_TOKEN", "")
+    active_id = find_active_profile(profiles, current)
+    if active_id and cur_key and active_id in profiles:
+        profiles[active_id]["config"]["env"]["ANTHROPIC_API_KEY"] = cur_key
+        if profiles[active_id]["config"]["env"].get("ANTHROPIC_BASE_URL"):
+            profiles[active_id]["config"]["env"]["ANTHROPIC_AUTH_TOKEN"] = cur_key
+        save_json(PROFILES_PATH, profiles)
+
+    target_profile = profiles[profile_id]
+    target_config = target_profile["config"]
     target_env = dict(target_config.get("env", {}))
 
-    if not target_env.get("ANTHROPIC_API_KEY") and cur_key:
-        target_base = target_env.get("ANTHROPIC_BASE_URL", "")
-        cur_base = cur_env.get("ANTHROPIC_BASE_URL", "")
-        if ("z.ai" in target_base and "z.ai" in cur_base) or (not target_base and not cur_base):
-            target_env["ANTHROPIC_API_KEY"] = cur_key
+    target_key = target_env.get("ANTHROPIC_API_KEY", "") or target_env.get("ANTHROPIC_AUTH_TOKEN", "")
+
+    # If target has a key, ensure both ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN are set for custom endpoints
+    if target_key:
+        target_env["ANTHROPIC_API_KEY"] = target_key
+        if target_env.get("ANTHROPIC_BASE_URL"):
+            target_env["ANTHROPIC_AUTH_TOKEN"] = target_key
+    elif sys.stdin.isatty():
+        sys.stdout.write(CURSOR_SHOW)
+        sys.stdout.flush()
+        print(f"\n{YELLOW}🔑 No API key / token set for '{target_profile['name']}'.{RESET}")
+        val = input(f"{BOLD}Enter API Key / Token (or press Enter to skip): {RESET}").strip()
+        if val:
+            target_key = val
+            target_env["ANTHROPIC_API_KEY"] = val
+            if target_env.get("ANTHROPIC_BASE_URL"):
+                target_env["ANTHROPIC_AUTH_TOKEN"] = val
+            target_profile["config"]["env"] = target_env
+            profiles[profile_id] = target_profile
+            save_json(PROFILES_PATH, profiles)
 
     new_config = dict(target_config)
     new_config["env"] = target_env
@@ -506,6 +528,11 @@ def menu_edit_config():
             backup_settings()
             save_json(SETTINGS_PATH, current)
             sync_zshrc_env(current)
+            profiles = load_profiles()
+            active_id = find_active_profile(profiles, current)
+            if active_id and active_id in profiles:
+                profiles[active_id]["config"] = current
+                save_json(PROFILES_PATH, profiles)
             break
         elif opt_id == "window":
             cur_win = env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "")
