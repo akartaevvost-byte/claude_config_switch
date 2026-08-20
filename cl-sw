@@ -1,0 +1,759 @@
+#!/usr/bin/env python3
+"""
+Claude Code Configuration Switcher (cl-sw / claude-config / cc-switch)
+Flicker-free interactive TUI and CLI tool for managing and switching Claude Code profiles.
+"""
+
+import os
+import sys
+import json
+import shutil
+import tty
+import termios
+import select
+import subprocess
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
+
+SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
+PROFILES_PATH = Path.home() / ".claude" / "profiles.json"
+BACKUP_DIR = Path.home() / ".claude" / "backups"
+ZSHRC_PATH = Path.home() / ".zshrc"
+
+# Color / Style constants
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+ITALIC = "\033[3m"
+UNDERLINE = "\033[4m"
+
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+BLUE = "\033[34m"
+MAGENTA = "\033[35m"
+CYAN = "\033[36m"
+WHITE = "\033[37m"
+
+BG_CYAN = "\033[46m"
+BG_BLUE = "\033[44m"
+BLACK_TXT = "\033[30m"
+
+# Terminal control
+CURSOR_HIDE = "\033[?25l"
+CURSOR_SHOW = "\033[?25h"
+ALT_SCREEN_ON = "\033[?1049h"
+ALT_SCREEN_OFF = "\033[?1049l"
+
+
+DEFAULT_PROFILES = {
+    "zai-1m": {
+        "name": "Z.AI GLM-5.3 [1M Window]",
+        "description": "Z.AI GLM-5.3 with 1M context window",
+        "config": {
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+                "ANTHROPIC_API_KEY": "",
+                "API_TIMEOUT_MS": "3000000",
+                "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.3[1m]",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.3[1m]",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7"
+            },
+            "model": "opus",
+            "effortLevel": "medium"
+        }
+    },
+    "zai-standard": {
+        "name": "Z.AI GLM-5.3 [Standard 128k]",
+        "description": "Z.AI GLM-5.3 standard window",
+        "config": {
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+                "ANTHROPIC_API_KEY": "",
+                "API_TIMEOUT_MS": "3000000",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.3",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-4.7",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.5-air"
+            },
+            "model": "opus",
+            "effortLevel": "medium"
+        }
+    },
+    "vv-router": {
+        "name": "VkusVill Router",
+        "description": "VkusVill red-mad-router",
+        "config": {
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://vvchat.vkusvill.ru/red-mad-router",
+                "ANTHROPIC_API_KEY": "",
+                "API_TIMEOUT_MS": "3000000",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-6",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.5-pro",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.5"
+            },
+            "model": "opus",
+            "effortLevel": "medium"
+        }
+    }
+}
+
+
+def load_json(file_path: Path) -> Dict[str, Any]:
+    if not file_path.exists():
+        return {}
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_json(file_path: Path, data: Dict[str, Any]) -> bool:
+    try:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        return True
+    except Exception as e:
+        print(f"{RED}Error saving {file_path}: {e}{RESET}")
+        return False
+
+
+def get_current_settings() -> Dict[str, Any]:
+    return load_json(SETTINGS_PATH)
+
+
+def load_profiles() -> Dict[str, Any]:
+    current_stored = load_json(PROFILES_PATH)
+    profiles = dict(DEFAULT_PROFILES)
+    
+    current = get_current_settings()
+    current_key = current.get("env", {}).get("ANTHROPIC_API_KEY", "")
+    current_base = current.get("env", {}).get("ANTHROPIC_BASE_URL", "")
+
+    if current_key and "z.ai" in current_base:
+        for k in ["zai-1m", "zai-standard"]:
+            if k in profiles:
+                profiles[k]["config"]["env"]["ANTHROPIC_API_KEY"] = current_key
+
+    if current_stored:
+        profiles.update(current_stored)
+    else:
+        save_json(PROFILES_PATH, profiles)
+
+    return profiles
+
+
+def backup_settings():
+    if SETTINGS_PATH.exists():
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        bak_file = BACKUP_DIR / "settings.json.bak"
+        shutil.copy2(SETTINGS_PATH, bak_file)
+
+
+def mask_key(key: str) -> str:
+    if not key:
+        return f"{DIM}(not set){RESET}"
+    if len(key) <= 8:
+        return "********"
+    return key[:4] + "..." + key[-4:]
+
+
+def find_active_profile(profiles: Dict[str, Any], current_settings: Dict[str, Any]) -> Optional[str]:
+    cur_env = current_settings.get("env", {})
+    cur_base = cur_env.get("ANTHROPIC_BASE_URL", "")
+    cur_opus = cur_env.get("ANTHROPIC_DEFAULT_OPUS_MODEL", "")
+    cur_window = cur_env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "")
+
+    for p_id, p_data in profiles.items():
+        p_env = p_data.get("config", {}).get("env", {})
+        p_base = p_env.get("ANTHROPIC_BASE_URL", "")
+        p_opus = p_env.get("ANTHROPIC_DEFAULT_OPUS_MODEL", "")
+        p_window = p_env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "")
+
+        if cur_base == p_base and cur_opus == p_opus and cur_window == p_window:
+            return p_id
+    return None
+
+
+def sync_zshrc_env(config: Dict[str, Any]):
+    if not ZSHRC_PATH.exists():
+        return
+    try:
+        lines = ZSHRC_PATH.read_text(encoding="utf-8").splitlines()
+        new_lines = []
+        
+        env = config.get("env", {})
+        opus = env.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+        sonnet = env.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+        haiku = env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+        window = env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+        base = env.get("ANTHROPIC_BASE_URL")
+        
+        for line in lines:
+            if "export CLAUDE_CODE_AUTO_COMPACT_WINDOW=" in line:
+                if window:
+                    new_lines.append(f'export CLAUDE_CODE_AUTO_COMPACT_WINDOW="{window}"')
+                continue
+            elif "export ANTHROPIC_DEFAULT_OPUS_MODEL=" in line:
+                if opus:
+                    new_lines.append(f'export ANTHROPIC_DEFAULT_OPUS_MODEL="{opus}"')
+                continue
+            elif "export ANTHROPIC_DEFAULT_SONNET_MODEL=" in line:
+                if sonnet:
+                    new_lines.append(f'export ANTHROPIC_DEFAULT_SONNET_MODEL="{sonnet}"')
+                continue
+            elif "export ANTHROPIC_DEFAULT_HAIKU_MODEL=" in line:
+                if haiku:
+                    new_lines.append(f'export ANTHROPIC_DEFAULT_HAIKU_MODEL="{haiku}"')
+                continue
+            elif "export ANTHROPIC_BASE_URL=" in line:
+                if base:
+                    new_lines.append(f'export ANTHROPIC_BASE_URL="{base}"')
+                continue
+            new_lines.append(line)
+        
+        ZSHRC_PATH.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def apply_profile(profile_id: str, profiles: Dict[str, Any]) -> bool:
+    if profile_id not in profiles:
+        print(f"{RED}Profile '{profile_id}' not found.{RESET}")
+        return False
+
+    target_profile = profiles[profile_id]
+    target_config = target_profile["config"]
+
+    current = get_current_settings()
+    cur_env = current.get("env", {})
+    cur_key = cur_env.get("ANTHROPIC_API_KEY", "")
+    target_env = dict(target_config.get("env", {}))
+
+    if not target_env.get("ANTHROPIC_API_KEY") and cur_key:
+        target_base = target_env.get("ANTHROPIC_BASE_URL", "")
+        cur_base = cur_env.get("ANTHROPIC_BASE_URL", "")
+        if ("z.ai" in target_base and "z.ai" in cur_base) or (not target_base and not cur_base):
+            target_env["ANTHROPIC_API_KEY"] = cur_key
+
+    new_config = dict(target_config)
+    new_config["env"] = target_env
+
+    backup_settings()
+    success = save_json(SETTINGS_PATH, new_config)
+    if success:
+        sync_zshrc_env(new_config)
+    return success
+
+
+def get_key() -> str:
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        raw_bytes = os.read(fd, 32)
+        if not raw_bytes:
+            return ""
+
+        # Arrow Up variations
+        if raw_bytes in (b"\x1b[A", b"\x1bOA", b"\x1b[1;2A", b"\x1b[1;5A"):
+            return "UP"
+        # Arrow Down variations
+        elif raw_bytes in (b"\x1b[B", b"\x1bOB", b"\x1b[1;2B", b"\x1b[1;5B"):
+            return "DOWN"
+        # Arrow Right variations
+        elif raw_bytes in (b"\x1b[C", b"\x1bOC"):
+            return "RIGHT"
+        # Arrow Left variations
+        elif raw_bytes in (b"\x1b[D", b"\x1bOD"):
+            return "LEFT"
+        # Page Up / Home
+        elif raw_bytes in (b"\x1b[5~", b"\x1b[H", b"\x1bOH", b"\x1b[1~"):
+            return "UP"
+        # Page Down / End
+        elif raw_bytes in (b"\x1b[6~", b"\x1b[F", b"\x1bOF", b"\x1b[4~"):
+            return "DOWN"
+        # Enter
+        elif raw_bytes in (b"\r", b"\n"):
+            return "ENTER"
+        # Space
+        elif raw_bytes == b" ":
+            return "SPACE"
+        # Tab
+        elif raw_bytes == b"\t":
+            return "TAB"
+        # Shift+Tab (backtab)
+        elif raw_bytes == b"\x1b[Z":
+            return "UP"
+        # Backspace
+        elif raw_bytes in (b"\x7f", b"\x08"):
+            return "BACKSPACE"
+        # Ctrl+C
+        elif raw_bytes == b"\x03":
+            return "CTRL_C"
+        # Ctrl+D
+        elif raw_bytes == b"\x04":
+            return "CTRL_D"
+        # Escape key alone
+        elif raw_bytes == b"\x1b":
+            return "ESC"
+
+        try:
+            return raw_bytes.decode("utf-8")
+        except Exception:
+            return ""
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def render_frame(lines: List[str]):
+    """Flicker-free single-write frame renderer."""
+    out = ["\033[H"]
+    for line in lines:
+        out.append(line + "\033[K\n")
+    out.append("\033[J")
+    sys.stdout.write("".join(out))
+    sys.stdout.flush()
+
+
+def build_header_lines(title: str = "Claude Code Profile Manager") -> List[str]:
+    return [
+        f"{CYAN}{BOLD}╔════════════════════════════════════════════════════════════════════════════╗{RESET}",
+        f"{CYAN}{BOLD}║{WHITE}  🤖  {title.center(68)}  {CYAN}{BOLD}║{RESET}",
+        f"{CYAN}{BOLD}╚════════════════════════════════════════════════════════════════════════════╝{RESET}",
+        ""
+    ]
+
+
+def build_summary_lines(current: Dict[str, Any], profiles: Dict[str, Any]) -> List[str]:
+    env = current.get("env", {})
+    active_id = find_active_profile(profiles, current)
+    active_name = profiles[active_id]["name"] if active_id else f"{YELLOW}Custom / Unsaved{RESET}"
+
+    base_url = env.get("ANTHROPIC_BASE_URL", f"{DIM}Official Anthropic API{RESET}")
+    opus_m = env.get("ANTHROPIC_DEFAULT_OPUS_MODEL", f"{DIM}default (opus){RESET}")
+    sonnet_m = env.get("ANTHROPIC_DEFAULT_SONNET_MODEL", f"{DIM}default (sonnet){RESET}")
+    haiku_m = env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", f"{DIM}default (haiku){RESET}")
+    compact_window = env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", f"{DIM}default{RESET}")
+    effort = current.get("effortLevel", f"{DIM}default{RESET}")
+    model = current.get("model", f"{DIM}default{RESET}")
+    api_key_status = mask_key(env.get("ANTHROPIC_API_KEY", ""))
+
+    return [
+        f" {BOLD}Active Profile:{RESET} {GREEN}{BOLD}{active_name}{RESET}",
+        f" {DIM}Endpoint:{RESET}       {CYAN}{base_url}{RESET}",
+        f" {DIM}Opus Model:{RESET}     {MAGENTA}{opus_m}{RESET}",
+        f" {DIM}Sonnet Model:{RESET}   {MAGENTA}{sonnet_m}{RESET}",
+        f" {DIM}Haiku Model:{RESET}    {MAGENTA}{haiku_m}{RESET}",
+        f" {DIM}Context Window:{RESET} {YELLOW}{compact_window}{RESET}  |  {DIM}Effort:{RESET} {YELLOW}{effort}{RESET}  |  {DIM}Default Target:{RESET} {YELLOW}{model}{RESET}",
+        f" {DIM}API Key:{RESET}        {api_key_status}",
+        f"{CYAN}{'─' * 76}{RESET}",
+        ""
+    ]
+
+
+def interactive_select(title: str, options: List[Tuple[str, str, str]], selected_idx: int = 0) -> Optional[int]:
+    current_idx = selected_idx
+    total = len(options)
+
+    # Alternate screen & hide cursor for perfectly flicker-free display
+    sys.stdout.write(ALT_SCREEN_ON + CURSOR_HIDE)
+    sys.stdout.flush()
+
+    try:
+        while True:
+            current_settings = get_current_settings()
+            profiles = load_profiles()
+
+            lines = []
+            lines.extend(build_header_lines(title))
+            lines.extend(build_summary_lines(current_settings, profiles))
+            lines.append(f" {BOLD}Use {CYAN}↑/↓ (Up/Down){RESET}{BOLD} or {CYAN}j/k{RESET}{BOLD} to navigate, {GREEN}Enter{RESET}{BOLD} to select, {YELLOW}q/Esc{RESET}{BOLD} to exit:{RESET}")
+            lines.append("")
+
+            for idx, (opt_id, label, desc) in enumerate(options):
+                is_selected = (idx == current_idx)
+                prefix = f" {CYAN}{BOLD}❯{RESET} " if is_selected else "   "
+                num = f"{DIM}{idx + 1}.{RESET} "
+                
+                if is_selected:
+                    line = f"{prefix}{num}{BG_CYAN}{BLACK_TXT}{BOLD} {label} {RESET}"
+                else:
+                    line = f"{prefix}{num}{BOLD}{label}{RESET}"
+                
+                if desc:
+                    line += f"  {DIM}{desc}{RESET}"
+                lines.append(line)
+
+            lines.append("")
+            lines.append(f"{DIM}{'─' * 76}{RESET}")
+            lines.append(f" {DIM}Shortcuts: [↑/↓] navigate, [Enter] select, [1-{total}] direct select, [q] quit{RESET}")
+
+            render_frame(lines)
+
+            key = get_key()
+            if key in ['UP', 'k', 'K', 'w', 'W']:
+                current_idx = (current_idx - 1) % total
+            elif key in ['DOWN', 'j', 'J', 's', 'S', 'TAB']:
+                current_idx = (current_idx + 1) % total
+            elif key in ['ENTER', 'SPACE']:
+                return current_idx
+            elif key in ['q', 'Q', 'ESC', 'CTRL_C']:
+                return None
+            elif key.isdigit():
+                num_val = int(key)
+                if 1 <= num_val <= total:
+                    return num_val - 1
+    finally:
+        sys.stdout.write(CURSOR_SHOW + ALT_SCREEN_OFF)
+        sys.stdout.flush()
+
+
+def menu_switch_profile():
+    profiles = load_profiles()
+    current_settings = get_current_settings()
+    active_id = find_active_profile(profiles, current_settings)
+
+    options = []
+    profile_ids = list(profiles.keys())
+    initial_idx = 0
+
+    for idx, p_id in enumerate(profile_ids):
+        p_data = profiles[p_id]
+        name = p_data.get("name", p_id)
+        desc = p_data.get("description", "")
+        if p_id == active_id:
+            name = f"{name} {GREEN}(Active){RESET}"
+            initial_idx = idx
+        options.append((p_id, name, desc))
+
+    selected = interactive_select("Select Profile", options, initial_idx)
+    if selected is not None:
+        target_id = profile_ids[selected]
+        if apply_profile(target_id, profiles):
+            sys.stdout.write(ALT_SCREEN_ON + CURSOR_HIDE)
+            lines = build_header_lines("Profile Switched")
+            lines.append(f"{GREEN}{BOLD}✔ Successfully switched to profile: {profiles[target_id]['name']}{RESET}")
+            lines.append("")
+            lines.append(f"{DIM}Press Enter to continue...{RESET}")
+            render_frame(lines)
+            get_key()
+            sys.stdout.write(CURSOR_SHOW + ALT_SCREEN_OFF)
+            sys.stdout.flush()
+
+
+def menu_view_config():
+    sys.stdout.write(ALT_SCREEN_ON + CURSOR_HIDE)
+    sys.stdout.flush()
+    try:
+        current = get_current_settings()
+        profiles = load_profiles()
+        lines = []
+        lines.extend(build_header_lines("Current Claude Code Configuration"))
+        lines.extend(build_summary_lines(current, profiles))
+        lines.append(f"{BOLD}Raw JSON ({SETTINGS_PATH}):{RESET}")
+        lines.append("")
+        for l in json.dumps(current, indent=2, ensure_ascii=False).splitlines():
+            lines.append(f"  {l}")
+        lines.append("")
+        lines.append(f"{DIM}{'─' * 76}{RESET}")
+        lines.append(f"{DIM}Press Enter to return...{RESET}")
+        render_frame(lines)
+        get_key()
+    finally:
+        sys.stdout.write(CURSOR_SHOW + ALT_SCREEN_OFF)
+        sys.stdout.flush()
+
+
+def menu_edit_config():
+    current = get_current_settings()
+    env = current.setdefault("env", {})
+
+    while True:
+        options = [
+            ("model", "Change Default Target Model", f"Current: {current.get('model', 'opus')}"),
+            ("opus", "Change Opus Model Mapping", f"Current: {env.get('ANTHROPIC_DEFAULT_OPUS_MODEL', '(default)')}"),
+            ("sonnet", "Change Sonnet Model Mapping", f"Current: {env.get('ANTHROPIC_DEFAULT_SONNET_MODEL', '(default)')}"),
+            ("haiku", "Change Haiku Model Mapping", f"Current: {env.get('ANTHROPIC_DEFAULT_HAIKU_MODEL', '(default)')}"),
+            ("window", "Toggle/Set 1M Context Window", f"Current: {env.get('CLAUDE_CODE_AUTO_COMPACT_WINDOW', '(default)')}"),
+            ("effort", "Change Effort Level", f"Current: {current.get('effortLevel', 'medium')}"),
+            ("base_url", "Change Base URL", f"Current: {env.get('ANTHROPIC_BASE_URL', '(default)')}"),
+            ("api_key", "Change API Key", f"Current: {mask_key(env.get('ANTHROPIC_API_KEY', ''))}"),
+            ("save", "Save and Return", "Apply all changes to ~/.claude/settings.json"),
+            ("cancel", "Cancel", "Discard unsaved changes")
+        ]
+
+        choice = interactive_select("Edit Configuration", [(o[0], o[1], o[2]) for o in options])
+        if choice is None or options[choice][0] == "cancel":
+            break
+        
+        opt_id = options[choice][0]
+        if opt_id == "save":
+            backup_settings()
+            save_json(SETTINGS_PATH, current)
+            sync_zshrc_env(current)
+            break
+        elif opt_id == "window":
+            cur_win = env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "")
+            if cur_win == "1000000":
+                env.pop("CLAUDE_CODE_AUTO_COMPACT_WINDOW", None)
+            else:
+                env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
+        elif opt_id == "effort":
+            efforts = [("low", "low", "Low thinking intensity"), ("medium", "medium", "Medium thinking intensity"), ("high", "high", "High thinking intensity"), ("max", "max", "Maximum reasoning effort")]
+            eff_idx = interactive_select("Choose Effort Level", efforts)
+            if eff_idx is not None:
+                current["effortLevel"] = efforts[eff_idx][0]
+        elif opt_id == "model":
+            models = [("opus", "opus", "Opus tier (high capability)"), ("sonnet", "sonnet", "Sonnet tier (standard)"), ("haiku", "haiku", "Haiku tier (fast)")]
+            m_idx = interactive_select("Choose Target Model", models)
+            if m_idx is not None:
+                current["model"] = models[m_idx][0]
+        else:
+            # Need text input prompt
+            sys.stdout.write(CURSOR_SHOW)
+            sys.stdout.flush()
+            if opt_id == "opus":
+                val = input(f"\n{BOLD}Opus Model [{env.get('ANTHROPIC_DEFAULT_OPUS_MODEL', '')}]: {RESET}").strip()
+                if val:
+                    env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = val
+            elif opt_id == "sonnet":
+                val = input(f"\n{BOLD}Sonnet Model [{env.get('ANTHROPIC_DEFAULT_SONNET_MODEL', '')}]: {RESET}").strip()
+                if val:
+                    env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = val
+            elif opt_id == "haiku":
+                val = input(f"\n{BOLD}Haiku Model [{env.get('ANTHROPIC_DEFAULT_HAIKU_MODEL', '')}]: {RESET}").strip()
+                if val:
+                    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = val
+            elif opt_id == "base_url":
+                val = input(f"\n{BOLD}Base URL [{env.get('ANTHROPIC_BASE_URL', '')}]: {RESET}").strip()
+                if val:
+                    env["ANTHROPIC_BASE_URL"] = val
+            elif opt_id == "api_key":
+                val = input(f"\n{BOLD}Enter new API Key: {RESET}").strip()
+                if val:
+                    env["ANTHROPIC_API_KEY"] = val
+
+
+def menu_save_as_profile():
+    sys.stdout.write(CURSOR_SHOW)
+    sys.stdout.flush()
+    print(f"\n{BOLD}=== Save Current Config as New Profile ==={RESET}")
+    current = get_current_settings()
+    profiles = load_profiles()
+
+    name = input(f"{BOLD}Enter profile display name: {RESET}").strip()
+    if not name:
+        return
+
+    profile_id = name.lower().replace(" ", "-").replace("/", "-")
+    desc = input(f"{BOLD}Enter description (optional): {RESET}").strip()
+
+    profiles[profile_id] = {
+        "name": name,
+        "description": desc or "Custom user profile",
+        "config": current
+    }
+
+    save_json(PROFILES_PATH, profiles)
+
+
+def menu_delete_profile():
+    profiles = load_profiles()
+    custom_ids = [p_id for p_id in profiles.keys() if p_id not in DEFAULT_PROFILES]
+
+    if not custom_ids:
+        sys.stdout.write(ALT_SCREEN_ON + CURSOR_HIDE)
+        lines = build_header_lines("Delete Profile")
+        lines.append(f"{YELLOW}No custom profiles to delete (built-in profiles cannot be deleted).{RESET}")
+        lines.append("")
+        lines.append(f"{DIM}Press Enter to continue...{RESET}")
+        render_frame(lines)
+        get_key()
+        sys.stdout.write(CURSOR_SHOW + ALT_SCREEN_OFF)
+        sys.stdout.flush()
+        return
+
+    options = [(p_id, profiles[p_id]["name"], profiles[p_id].get("description", "")) for p_id in custom_ids]
+    selected = interactive_select("Select Profile to Delete", options)
+    if selected is not None:
+        p_id = custom_ids[selected]
+        del profiles[p_id]
+        save_json(PROFILES_PATH, profiles)
+
+
+def menu_test_connection():
+    sys.stdout.write(ALT_SCREEN_ON + CURSOR_HIDE)
+    sys.stdout.flush()
+    try:
+        current = get_current_settings()
+        env = current.get("env", {})
+        base_url = env.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+        model = env.get("ANTHROPIC_DEFAULT_OPUS_MODEL", current.get("model", "opus"))
+
+        lines = build_header_lines("Testing Claude Connection")
+        lines.append(f"{BOLD}Sending quick test prompt to Claude Code...{RESET}")
+        lines.append(f"{DIM}Target: {base_url} ({model}){RESET}")
+        lines.append("")
+        lines.append(f"{YELLOW}Testing in progress, please wait...{RESET}")
+        render_frame(lines)
+
+        try:
+            res = subprocess.run(["claude", "-p", "ping"], capture_output=True, text=True, timeout=15)
+            lines = build_header_lines("Testing Claude Connection")
+            lines.append(f"{BOLD}Target: {base_url} ({model}){RESET}")
+            lines.append("")
+            if res.returncode == 0:
+                lines.append(f"{GREEN}{BOLD}✔ SUCCESS! Response received:{RESET}")
+                lines.append("")
+                for l in res.stdout.strip().splitlines():
+                    lines.append(f"  {CYAN}{l}{RESET}")
+            else:
+                lines.append(f"{RED}{BOLD}✖ Error (exit code {res.returncode}):{RESET}")
+                lines.append("")
+                output = res.stderr or res.stdout
+                for l in output.strip().splitlines():
+                    lines.append(f"  {l}")
+        except subprocess.TimeoutExpired:
+            lines.append(f"{YELLOW}⚠ Request timed out after 15s. Check network or API key.{RESET}")
+        except Exception as e:
+            lines.append(f"{RED}✖ Failed to run claude: {e}{RESET}")
+
+        lines.append("")
+        lines.append(f"{DIM}{'─' * 76}{RESET}")
+        lines.append(f"{DIM}Press Enter to continue...{RESET}")
+        render_frame(lines)
+        get_key()
+    finally:
+        sys.stdout.write(CURSOR_SHOW + ALT_SCREEN_OFF)
+        sys.stdout.flush()
+
+
+def menu_launch_claude():
+    sys.stdout.write(CURSOR_SHOW + ALT_SCREEN_OFF)
+    sys.stdout.flush()
+    print(f"{GREEN}{BOLD}🚀 Launching Claude Code...{RESET}\n")
+    sys.exit(os.system("claude"))
+
+
+def main_menu():
+    while True:
+        options = [
+            ("switch", "⚡ Switch Profile / Preset", "Quickly activate a configured profile"),
+            ("view", "🔍 View Current Config", "Inspect settings.json details and models"),
+            ("edit", "✏️  Edit Active Configuration", "Modify models, context window, API key, effort"),
+            ("save", "💾 Save Active as New Profile", "Store current configuration under a custom name"),
+            ("test", "🧪 Test Connection", "Run a test ping with current settings"),
+            ("delete", "🗑️  Delete Custom Profile", "Remove a user-created profile"),
+            ("launch", "🚀 Launch Claude Code", "Run 'claude' immediately"),
+            ("exit", "🚪 Exit", "Quit the switcher")
+        ]
+
+        choice = interactive_select("Claude Code Profile Manager", [(o[0], o[1], o[2]) for o in options])
+        if choice is None:
+            break
+
+        action = options[choice][0]
+        if action == "switch":
+            menu_switch_profile()
+        elif action == "view":
+            menu_view_config()
+        elif action == "edit":
+            menu_edit_config()
+        elif action == "save":
+            menu_save_as_profile()
+        elif action == "test":
+            menu_test_connection()
+        elif action == "delete":
+            menu_delete_profile()
+        elif action == "launch":
+            menu_launch_claude()
+        elif action == "exit":
+            break
+
+
+def cli_list():
+    profiles = load_profiles()
+    current = get_current_settings()
+    active_id = find_active_profile(profiles, current)
+
+    print(f"\n{CYAN}{BOLD}Available Claude Code Profiles:{RESET}\n")
+    for p_id, p_data in profiles.items():
+        is_active = (p_id == active_id)
+        tag = f" {GREEN}{BOLD}[Active]{RESET}" if is_active else ""
+        print(f" • {BOLD}{p_id}{RESET}{tag}: {p_data.get('name', '')}")
+        print(f"   {DIM}{p_data.get('description', '')}{RESET}")
+        p_env = p_data.get("config", {}).get("env", {})
+        if "ANTHROPIC_DEFAULT_OPUS_MODEL" in p_env:
+            print(f"   {MAGENTA}Models:{RESET} {p_env.get('ANTHROPIC_DEFAULT_OPUS_MODEL')} (opus) | {p_env.get('ANTHROPIC_DEFAULT_SONNET_MODEL')} (sonnet)")
+        print()
+
+
+def main():
+    if len(sys.argv) > 1:
+        arg = sys.argv[1].lower()
+        if arg in ["-l", "--list", "list"]:
+            cli_list()
+            return
+        elif arg in ["-s", "--switch", "switch"]:
+            if len(sys.argv) < 3:
+                print(f"{RED}Usage: {sys.argv[0]} switch <profile-id>{RESET}")
+                cli_list()
+                return
+            target = sys.argv[2]
+            profiles = load_profiles()
+            if apply_profile(target, profiles):
+                print(f"{GREEN}{BOLD}✔ Switched to profile '{target}' ({profiles[target]['name']}){RESET}")
+            else:
+                print(f"{RED}Available profiles:{RESET} {', '.join(profiles.keys())}")
+            return
+        elif arg in ["-c", "--current", "current", "status"]:
+            menu_view_config()
+            return
+        elif arg in ["-t", "--test", "test"]:
+            menu_test_connection()
+            return
+        elif arg in ["-h", "--help", "help"]:
+            print(f"""
+{CYAN}{BOLD}Claude Code Configuration Switcher{RESET}
+
+{BOLD}Usage:{RESET}
+  {GREEN}cl-sw{RESET}                             Launch interactive TUI menu
+  {GREEN}cl-sw list{RESET}                        List all profiles
+  {GREEN}cl-sw switch <profile>{RESET}            Switch directly to a profile
+  {GREEN}cl-sw current{RESET}                     Show current settings
+  {GREEN}cl-sw test{RESET}                        Test current connection
+  {GREEN}cl-sw help{RESET}                        Show this help
+
+{BOLD}Aliases:{RESET}
+  cl-sw, claude-config, claude-switch, cc-switch, cconf
+""")
+            return
+        else:
+            profiles = load_profiles()
+            if arg in profiles:
+                if apply_profile(arg, profiles):
+                    print(f"{GREEN}{BOLD}✔ Switched to profile '{arg}' ({profiles[arg]['name']}){RESET}")
+                    return
+            print(f"{RED}Unknown command or profile: '{arg}'{RESET}")
+            print(f"Run '{sys.argv[0]} --help' for usage.")
+            return
+
+    if not sys.stdin.isatty():
+        cli_list()
+        return
+
+    try:
+        main_menu()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sys.stdout.write(CURSOR_SHOW + ALT_SCREEN_OFF)
+        sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()
