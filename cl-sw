@@ -80,6 +80,17 @@ DEFAULT_PROFILES = {
             "effortLevel": "medium"
         }
     },
+    "anthropic": {
+        "name": "Anthropic Official",
+        "description": "Official Anthropic API (Claude 3.7 Sonnet / Opus / 3.5 Haiku)",
+        "config": {
+            "env": {
+                "ANTHROPIC_API_KEY": ""
+            },
+            "model": "sonnet",
+            "effortLevel": "medium"
+        }
+    },
     "vv-router": {
         "name": "VkusVill Router",
         "description": "VkusVill red-mad-router",
